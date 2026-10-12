@@ -1,0 +1,9 @@
+{
+  "id": "moonreader-importer",
+  "name": "MoonReader Importer",
+  "version": "1.2.0",
+  "minAppVersion": "1.4.10",
+  "description": "Импорт заметок и цитат из экспорта Moon+ Reader: заметки со ссылками «предыдущая/следующая» и карточка книги.",
+  "author": "me",
+  "isDesktopOnly": false
+}
