@@ -33,6 +33,14 @@ function cleanTitle(raw) {
   return title.slice(0, MAX_BOOK_NAME_LEN - 6).trim() || "Без названия";
 }
 
+function capitalizeBookTitle(raw) {
+  const title = cleanTitle(raw).toLocaleLowerCase("ru-RU");
+  const chars = [...title];
+  if (!chars.length) return "Без названия";
+  chars[0] = chars[0].toLocaleUpperCase("ru-RU");
+  return chars.join("");
+}
+
 function basenameNoExt(p) {
   const base = p.split(/[\\/]/).pop();
   return base.replace(BOOK_EXTENSIONS, "");
@@ -111,7 +119,7 @@ function resolveBookTitles(notes) {
     } else {
       chosen = slugToPrettyTitle(base) || base;
     }
-    resolved.set(key, cleanTitle(chosen));
+    resolved.set(key, capitalizeBookTitle(chosen));
   }
   return resolved;
 }
@@ -140,10 +148,10 @@ function assignNeighborLinks(notes, titles) {
   }
 }
 
-function buildNoteFrontmatter(author, bookTitle, prev, next) {
-  const l = ["---", `Автор: ${author}`, "Источник:", `  - ${bookTitle}`];
-  if (prev) l.push(`Предыдущая заметка: "[[${prev}]]"`);
-  if (next) l.push(`Следующая заметка: "[[${next}]]"`);
+function buildNoteFrontmatter(author, bookTitle, prev, next, date) {
+  const l = ["---", "Источник:", `  - "[[${bookTitle}]]"`, `Автор: ${author}`, `Дата: ${date}`];
+  if (prev) l.push(`Предыдущая: "[[${prev}]]"`);
+  if (next) l.push(`Следующая: "[[${next}]]"`);
   l.push("---");
   return l.join("\n");
 }
@@ -152,6 +160,12 @@ function today() {
   const d = new Date();
   const p = (x) => String(x).padStart(2, "0");
   return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}`;
+}
+
+function todayISO() {
+  const d = new Date();
+  const p = (x) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 /* ---------- Работа с хранилищем ---------- */
@@ -171,7 +185,33 @@ async function writeFile(vault, path, data) {
   else await vault.create(path, data);
 }
 
-async function importNotes(plugin, text, author) {
+function normalizeReadingTime(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+
+  let totalMinutes;
+  if (raw.includes(":")) {
+    const match = raw.match(/^(\d+):(\d{1,2})$/);
+    if (!match || Number(match[2]) > 59) {
+      throw new Error("Время через двоеточие укажите в формате часы:минуты, например 2:20.");
+    }
+    totalMinutes = Number(match[1]) * 60 + Number(match[2]);
+  } else {
+    const normalized = raw.replace(",", ".");
+    if (!/^\d+(\.\d+)?$/.test(normalized)) {
+      throw new Error("Некорректное время. Используйте десятичные часы (2,34) или формат часы:минуты (2:20).");
+    }
+    const hours = Number(normalized);
+    if (!Number.isFinite(hours)) throw new Error("Некорректное время чтения.");
+    totalMinutes = Math.round(hours * 60);
+  }
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}:${String(minutes).padStart(2, "0")}`;
+}
+
+async function importNotes(plugin, text, author, readingTime) {
   const { vault } = plugin.app;
   const { booksFolder, notesFolder } = plugin.settings;
 
@@ -184,6 +224,7 @@ async function importNotes(plugin, text, author) {
   await ensureFolder(vault, booksFolder);
   const processed = new Set();
   const date = today();
+  const noteDate = todayISO();
 
   for (const n of notes) {
     const dir = normalizePath(`${notesFolder}/${n.bookTitle}.notes`);
@@ -191,23 +232,23 @@ async function importNotes(plugin, text, author) {
 
     if (!processed.has(n.bookTitle)) {
       const index = `---
-Автор:
-  - ${author}
+Автор: ${author}
 Название: ${n.bookTitle}
 Дата прочтения: ${date}
-Прочитано: true
-Оценка: 
+Оценка:
 Жанр:
-cover:
+  -
 Заметки: "[[${n.linkName}]]"
 tags:
+  -
+Время чтения: ${readingTime}
 ---
 `;
       await writeFile(vault, normalizePath(`${booksFolder}/${n.bookTitle}.md`), index);
       processed.add(n.bookTitle);
     }
 
-    let md = `${buildNoteFrontmatter(author, n.bookTitle, n.prev, n.next)}\n\n> [!quote]\n> ${n.quote.replace(/\n/g, "\n> ")}\n`;
+    let md = `${buildNoteFrontmatter(author, n.bookTitle, n.prev, n.next, noteDate)}\n\n> [!quote]\n> ${n.quote.replace(/\n/g, "\n> ")}\n`;
     if (n.comment) md += `\n${n.comment}\n`;
     await writeFile(vault, normalizePath(`${dir}/${n.fileName}`), md.trim() + "\n");
   }
@@ -222,6 +263,7 @@ class ImportModal extends Modal {
     this.plugin = plugin;
     this.author = plugin.settings.lastAuthor || "";
     this.file = null;
+    this.readingTime = "";
   }
 
   onOpen() {
@@ -246,6 +288,11 @@ class ImportModal extends Modal {
       .setDesc("Будет записан во все заметки")
       .addText((t) => t.setValue(this.author).onChange((v) => (this.author = v)));
 
+    new Setting(contentEl)
+      .setName("Время чтения")
+      .setDesc("Десятичные часы: 2,34 = 2 ч 20 мин; 5,75 = 5 ч 45 мин. Или укажите часы:минуты, например 2:00. Результат сохраняется как Ч:ММ с округлением до минуты.")
+      .addText((t) => t.setPlaceholder("Например, 2,34 или 2:20").onChange((v) => (this.readingTime = v)));
+
     new Setting(contentEl).addButton((b) =>
       b.setButtonText("Импортировать").setCta().onClick(async () => {
         if (!this.file) return new Notice("Выберите файл.");
@@ -254,7 +301,8 @@ class ImportModal extends Modal {
         try {
           const text = await this.file.text();
           const author = this.author.trim();
-          const res = await importNotes(this.plugin, text, author);
+          const readingTime = normalizeReadingTime(this.readingTime);
+          const res = await importNotes(this.plugin, text, author, readingTime);
           this.plugin.settings.lastAuthor = author;
           await this.plugin.saveSettings();
           new Notice(`Готово: заметок — ${res.notes}, книг — ${res.books}.`);
